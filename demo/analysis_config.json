@@ -1,0 +1,12 @@
+{
+  "themes": {
+    "public transport": "tram|transport|\\bbus\\b|commut|\\bcars?\\b|motorway",
+    "citizen energy": "solar|energy|electricity|cooperative",
+    "repair / sharing": "repair|tool library|sharing|waste",
+    "council / politics": "council|budget|consultation|petition"
+  },
+  "actor_classes": {
+    "collective (we / volunteers)": ["we", "us", "our", "volunteers", "residents", "neighbours", "the collective"],
+    "institutions / politics": ["city council", "council", "government", "politicians"]
+  }
+}
