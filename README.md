@@ -5,10 +5,14 @@ Instead of clustering short texts, the unit of analysis is a *proposition*:
 
     actor + action + object  (+ orientation + emotion)
 
-An LLM extracts propositions paragraph by paragraph; propositions that keep recurring across documents are chained
-into **narratives**, and every step is compared with the previous one and with day 1. The following questions are supported:
-did the actor, the action or the object transform? Did the author's stance flip from supportive to critical? Did the emotion 
-flip between *encouraging* and *dampening* protest? Emotions follow Jasper's (1998) typology of protest emotions.
+A narrative is not a sequence of propositions with similar wording. It is an evolving story of an issue: 
+- who is involved,
+- what is happening,
+- why it matters,
+- what should happen next, and
+- how the situation is interpreted.
+
+The propositions are the observable building blocks. The narrative is a thread that connects the propositions over time.
 
 ## Pipeline
 
