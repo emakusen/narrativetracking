@@ -109,7 +109,7 @@ class Config:
     lang: str = "en"
     max_sentences: int = 4          # paragraph = at most this many sentences
     min_chars: int = 80             # shorter chunks are merged into the previous one or dropped
-    max_props: int = 3              # propositions extracted per paragraph
+    max_props: int = 6              # propositions extracted per paragraph
     # --- merging inside one document ("same proposition") ---
     merge_thr: float = 0.80         # weighted SVO similarity needed to merge
     merge_window: int = 1           # 1 = only the directly preceding paragraph
@@ -128,6 +128,12 @@ class Config:
     top_n: int = 10
     skip_identical: bool = True    # do not render chains whose steps are verbatim repeats (footers, fixed slogans)
     identical_thr: float = 0.99    # a step counts as verbatim when its link similarity is at least this
+    # --- narrative-aware linking ---
+    candidate_top_k: int = 5       # historical candidates retained per proposition
+    candidate_min_score: float = 0.42
+    narrative_link_thr: float = 0.58
+    llm_link_classification: bool = True
+    max_link_calls: int = 0        # 0 = unlimited; cap for inexpensive dry runs
     max_steps: int = 5              # steps per figure page
     max_docs: int = 0               # 0 = all (use a small number for a dry run)
     extractor: str = "llm"          # llm | spacy (rule-based, no LLM calls; orientation/emotion stay neutral)
@@ -146,7 +152,13 @@ class Mention:
     emotion: str
     claim: str
     evidence: str
+    issue: str = ""
+    stakes: str = ""
+    goal: str = ""
+    causal: str = ""
+    evaluation: str = ""
     vec: dict = field(default_factory=dict, repr=False)
+    frame_vec: dict = field(default_factory=dict, repr=False)
 
 
 @dataclass
@@ -167,6 +179,12 @@ class Node:
     emotion: str = "neutral"
     claim: str = ""
     evidence: str = ""
+    issue: str = ""
+    stakes: str = ""
+    goal: str = ""
+    causal: str = ""
+    evaluation: str = ""
+    frame_vec: dict = field(default_factory=dict, repr=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -264,8 +282,9 @@ def llm_prompt(text: str, sao: dict, cfg: Config) -> str:
         "Return ONLY JSON in English with this shape:\n"
         '{"description": "1-2 neutral sentences on what the paragraph argues or reports",\n'
         ' "propositions": [{"actor": "...", "action": "...", "object": "...", "orientation": "...", '
-        '"emotion": "...", "claim": "..."}]}\n'
-        f"Give at most {cfg.max_props} distinct propositions; use an empty list if the paragraph makes no claim.\n"
+        '"emotion": "...", "claim": "...", "issue": "...", "stakes": "...", '
+        '"goal": "...", "causal": "...", "evaluation": "..."}]}\n'
+        f"Extract up to {cfg.max_props} DISTINCT independently meaningful propositions, not just the main claim. Do not omit reactions, demands, consequences, institutional actions or campaign actions.\n"
         "- actor: who acts or is held responsible; short canonical noun phrase (max 4 words), e.g. 'government', "
         "'young activists', 'we'\n"
         "- action: what the actor does or should do; lemmatised verb phrase (max 4 words)\n"
@@ -274,7 +293,10 @@ def llm_prompt(text: str, sao: dict, cfg: Config) -> str:
         f"{ORIENTATIONS}\n"
         + EMOTION_PROMPT +
         "- claim: the proposition as ONE English sentence (max 25 words)\n"
-        "Use the same wording for the same actor/action/object whenever they recur."
+        "Narrative frame fields: issue = underlying issue/topic (not just a broad domain); stakes = what is at risk/why it matters; "
+        "goal = desired outcome or proposed solution; causal = attributed cause/responsibility; evaluation = how the situation/actors are judged. "
+        "Use concise canonical phrases. These fields describe THIS proposition's framing and may legitimately change over time. "
+        "Do not force different propositions into the same wording. Extract each distinct claim even when it is a response to another claim."
         + (" ALL values (actor, action, object, claim) MUST be English: translate any German words." if cfg.force_english else "")
     )
 
@@ -282,7 +304,9 @@ def llm_prompt(text: str, sao: dict, cfg: Config) -> str:
 def spacy_propositions(text: str, nlp, cfg: Config) -> list:
     """Propositions from the dependency parse (see spacy_props.py); orientation and emotion are 'neutral'."""
     return [{"actor": norm_text(p["actor"]), "action": norm_text(p["action"]), "object": norm_text(p["object"]),
-             "orientation": "neutral", "emotion": "neutral", "claim": norm_text(p["claim"], 220)}
+             "orientation": "neutral", "emotion": "neutral", "claim": norm_text(p["claim"], 220),
+             "issue": norm_text(p.get("object") or p.get("claim")), "stakes": "unspecified", "goal": "unspecified",
+             "causal": "unspecified", "evaluation": "unspecified"}
             for p in extract_propositions(text, nlp, cfg.lang, cfg.max_props)]
 
 
@@ -304,6 +328,11 @@ def analyse_paragraph(llm: LLM, text: str, sao: dict, cfg: Config, nlp=None):
             "orientation": norm_choice(p.get("orientation"), ORIENTATIONS, "neutral"),
             "emotion": norm_emotion(p.get("emotion")),
             "claim": norm_text(p.get("claim"), 220),
+            "issue": norm_text(p.get("issue") or p.get("object") or p.get("claim"), 120),
+            "stakes": norm_text(p.get("stakes"), 120),
+            "goal": norm_text(p.get("goal"), 120),
+            "causal": norm_text(p.get("causal"), 120),
+            "evaluation": norm_text(p.get("evaluation"), 120),
         })
     return norm_text(out.get("description"), 400), props
 
@@ -354,15 +383,70 @@ def link_sim(a, b, cfg: Config) -> tuple:
 
 
 def attach_vectors(mentions: list, embedder) -> None:
+    """Embed SVO elements and narrative-frame fields separately."""
     strings = sorted({getattr(m, e) for m in mentions for e in ELEMENTS})
-    if not strings:
-        return
-    vecs = np.asarray(embedder.encode(strings, batch_size=64, normalize_embeddings=True, show_progress_bar=False),
-                      dtype=np.float32)
-    lookup = {s: (np.zeros(vecs.shape[1], dtype=np.float32) if s == "unspecified" else v)  # missing = no signal
-              for s, v in zip(strings, vecs)}
-    for m in mentions:
-        m.vec = {e: lookup[getattr(m, e)] for e in ELEMENTS}
+    if strings:
+        vecs = np.asarray(embedder.encode(strings, batch_size=64, normalize_embeddings=True, show_progress_bar=False), dtype=np.float32)
+        lookup = {s: (np.zeros(vecs.shape[1], dtype=np.float32) if s == "unspecified" else v) for s, v in zip(strings, vecs)}
+        for m in mentions:
+            m.vec = {e: lookup[getattr(m, e)] for e in ELEMENTS}
+    fields = ("claim", "issue", "stakes", "goal", "causal", "evaluation")
+    vals = sorted({getattr(m, f) for m in mentions for f in fields if getattr(m, f) and getattr(m, f) != "unspecified"})
+    if vals:
+        arr = np.asarray(embedder.encode(vals, batch_size=64, normalize_embeddings=True, show_progress_bar=False), dtype=np.float32)
+        lookup2 = {v: x for v, x in zip(vals, arr)}
+        for m in mentions:
+            m.frame_vec = {f: lookup2.get(getattr(m, f), np.zeros(arr.shape[1], dtype=np.float32)) for f in fields}
+
+
+def frame_similarity(a, b, field_name):
+    va, vb = a.frame_vec.get(field_name), b.frame_vec.get(field_name)
+    return cos_or_none(va, vb) if va is not None and vb is not None else None
+
+
+def candidate_score(a, b):
+    """Recall-oriented similarity for retrieving narrative-related candidates."""
+    weights = {"claim": .30, "issue": .25, "stakes": .15, "goal": .10, "causal": .10, "evaluation": .05}
+    vals = [(w, frame_similarity(a, b, k)) for k, w in weights.items()]
+    vals = [(w, v) for w, v in vals if v is not None]
+    svo, _ = prop_sim(a.vec, b.vec, (.25, .25, .50))
+    # Actor overlap is deliberately weak: actor changes are common in narrative development.
+    actor = cos_or_none(a.vec["actor"], b.vec["actor"])
+    if vals:
+        frame = sum(w*v for w, v in vals) / sum(w for w, _ in vals)
+    else:
+        frame = 0.0
+    score = .78 * frame + .17 * svo + .05 * (actor if actor is not None else 0.0)
+    return float(score), {k: frame_similarity(a, b, k) for k in weights} | {"svo": svo, "actor": actor}
+
+
+def classify_relationship(llm, earlier, later, score, cfg):
+    """Classify narrative relation; topic similarity alone is not a narrative link."""
+    allowed = ["continuation", "elaboration", "reaction", "consequence", "reframing", "contradiction",
+               "topic_related_not_continuous", "unrelated"]
+    if not cfg.llm_link_classification or not llm.ok:
+        return ("continuation" if score >= cfg.narrative_link_thr else "topic_related_not_continuous"), "embedding-based fallback"
+    prompt = (
+        "You are deciding whether a later proposition belongs to the same evolving narrative as an earlier proposition. "
+        "Narrative identity is continuity of the underlying storyline, not wording similarity. Topic similarity alone is insufficient. "
+        "Actor, action, wording, stance and emotion may change. Assess whether the later claim develops, elaborates, reacts to, "
+        "results from, reframes or contradicts the earlier storyline. If they merely concern the same broad topic without a "
+        "clear storyline relationship, choose topic_related_not_continuous. Choose unrelated when there is no meaningful relation.\n\n"
+        f"Context: {cfg.context}\nEarlier ({earlier.date.date()}, {earlier.doc_id}): {earlier.claim}\n"
+        f"Frame: issue={earlier.issue}; stakes={earlier.stakes}; goal={earlier.goal}; causal={earlier.causal}; evaluation={earlier.evaluation}\n\n"
+        f"Later ({later.date.date()}, {later.doc_id}): {later.claim}\n"
+        f"Frame: issue={later.issue}; stakes={later.stakes}; goal={later.goal}; causal={later.causal}; evaluation={later.evaluation}\n\n"
+        f"Candidate similarity: {score:.3f}\nReturn ONLY JSON with keys relation and rationale; relation must be one of: {', '.join(allowed)}."
+    )
+    try:
+        out = parse_json(llm._complete(prompt, 900)) or {}
+        rel = str(out.get("relation", "topic_related_not_continuous")).strip().lower()
+        if rel not in allowed:
+            rel = "topic_related_not_continuous"
+        return rel, norm_text(out.get("rationale", ""), 240)
+    except Exception as exc:
+        log.warning("relationship classification failed: %s", exc)
+        return ("continuation" if score >= cfg.narrative_link_thr else "topic_related_not_continuous"), "classifier fallback"
 
 
 def merge_document(mentions: list, cfg: Config) -> list:
@@ -419,22 +503,73 @@ def make_node(doc_rank: int, row, k: int, ms: list, cfg: Config) -> Node:
                 par_first=min(m.par for m in ms), par_last=max(m.par for m in ms), mentions=ms, vec=vec,
                 actor=medoid.actor, action=medoid.action, object=medoid.object,
                 orientation=pick("orientation"), emotion=pick("emotion"),
-                claim=medoid.claim, evidence=medoid.evidence)
+                claim=medoid.claim, evidence=medoid.evidence,
+                issue=pick("issue"), stakes=pick("stakes"), goal=pick("goal"), causal=pick("causal"),
+                evaluation=pick("evaluation"), frame_vec={f: medoid.frame_vec.get(f) for f in ("claim", "issue", "stakes", "goal", "causal", "evaluation")})
 
 
-def build_graph(nodes: list, cfg: Config) -> nx.DiGraph:
-    G, by_doc = nx.DiGraph(), {}
-    for n in nodes:
+def build_graph(nodes: list, cfg: Config, llm=None) -> nx.DiGraph:
+    """Build a temporal narrative graph with multiple typed edges and branch support.
+
+    For corpora above 2,000 propositions, use optional FAISS HNSW retrieval on claim
+    embeddings, then rerank retrieved candidates with the full narrative-frame score.
+    If FAISS is unavailable, fall back to exact all-history retrieval.
+    """
+    G = nx.DiGraph()
+    ordered = sorted(nodes, key=lambda n: (n.date, n.doc, n.id))
+    for n in ordered:
         G.add_node(n.id, node=n)
-        by_doc.setdefault(n.doc, []).append(n)
-    for n in nodes:
-        for gap in range(1, cfg.max_gap + 1):  # first gap with a match wins; gap > 1 = interrupted narrative
-            scored = [(link_sim(n, c, cfg), c) for c in by_doc.get(n.doc + gap, [])]
-            scored = [(s, cos, c) for (s, cos), c in scored if s >= cfg.link_thr]
-            if scored:
-                s, cos, c = max(scored, key=lambda x: x[0])
-                G.add_edge(n.id, c.id, sim=s, cos=cos, gap=gap, days=int((c.date - n.date).days))
-                break
+    calls = 0
+    indexes = None
+    retrieval_fields = ("claim", "issue", "stakes", "goal")
+    if len(ordered) > 2000:
+        try:
+            import faiss
+            dim = len(ordered[0].frame_vec["claim"])
+            indexes = {}
+            for field_name in retrieval_fields:
+                ix = faiss.IndexHNSWFlat(dim, 32, faiss.METRIC_INNER_PRODUCT)
+                ix.hnsw.efSearch = max(64, cfg.candidate_top_k * 8)
+                indexes[field_name] = ix
+            log.info("Using FAISS HNSW multi-field retrieval for %d propositions", len(ordered))
+        except Exception as exc:
+            indexes = None
+            log.warning("FAISS unavailable (%s); using exact historical candidate retrieval", exc)
+    for idx, later in enumerate(ordered):
+        if indexes is not None and idx:
+            retrieve_n = min(idx, max(cfg.candidate_top_k * 8, 40))
+            retrieved = set()
+            for field_name, ix in indexes.items():
+                q = np.asarray(later.frame_vec[field_name], dtype=np.float32).reshape(1, -1)
+                _, positions = ix.search(q, retrieve_n)
+                retrieved.update(int(x) for x in positions[0] if int(x) >= 0)
+            candidate_positions = sorted(retrieved)
+        else:
+            candidate_positions = list(range(idx))
+        candidates = []
+        for pos in candidate_positions:
+            earlier = ordered[pos]
+            if earlier.doc >= later.doc:  # narrative edges connect documents, not propositions within one document
+                continue
+            score, details = candidate_score(earlier, later)
+            if score >= cfg.candidate_min_score:
+                candidates.append((score, earlier, details))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        for score, earlier, details in candidates[:cfg.candidate_top_k]:
+            if cfg.max_link_calls and calls >= cfg.max_link_calls:
+                rel, rationale = ("continuation" if score >= cfg.narrative_link_thr else "topic_related_not_continuous"), "max_link_calls fallback"
+            else:
+                rel, rationale = classify_relationship(llm, earlier, later, score, cfg)
+                calls += int(cfg.llm_link_classification and llm is not None and llm.ok)
+            if rel in {"topic_related_not_continuous", "unrelated"}:
+                continue
+            G.add_edge(earlier.id, later.id, sim=float(score), cos=details, relation=rel, rationale=rationale,
+                       gap=max(1, later.doc-earlier.doc), days=int((later.date-earlier.date).days))
+        if indexes is not None:
+            for field_name, ix in indexes.items():
+                v = np.asarray(later.frame_vec[field_name], dtype=np.float32).reshape(1, -1)
+                ix.add(v)
+    log.info("Narrative graph: %d nodes, %d typed edges; %d relationship-classifier calls", G.number_of_nodes(), G.number_of_edges(), calls)
     return G
 
 
@@ -476,11 +611,14 @@ def describe_narrative(llm: LLM, steps: list, transitions: list, cfg: Config):
     for i, s in enumerate(steps):
         lead = f" [S={transitions[i - 1]['sim']:.2f}; {transitions[i - 1]['label']}]" if i else ""
         lines.append(f"{s['date']}{lead}: {s['actor']} | {s['action']} | {s['object']} | orientation={s['orientation']} "
-                     f"| emotion={s['emotion']} | claim: {s['claim']}")
-    prompt = ("These are the successive forms of ONE proposition (actor | action | object | orientation | emotion) "
-              "across documents of " + cfg.context + ", in time order.\n" + "\n".join(lines) +
-              '\n\nReturn ONLY JSON: {"title": "max 8 words", "summary": "2-3 sentences describing how each element '
-              'of the proposition was transformed over time and the most important change"}')
+                     f"| emotion={s['emotion']} | issue={s.get('issue', '')} | stakes={s.get('stakes', '')} | "
+                     f"goal={s.get('goal', '')} | causal={s.get('causal', '')} | evaluation={s.get('evaluation', '')} | claim: {s['claim']}")
+    prompt = ("These are a temporally ordered dominant path through ONE evolving narrative thread from " + cfg.context + ". "
+              "The propositions need not express the same SVO structure. Explain the storyline's development, including "
+              "changes in problem definition, actors and agency, stakes, goals, causal attribution, evaluation, orientation "
+              "and emotion. Distinguish continuity of the underlying storyline from changes in its framing. Do not invent "
+              "developments not supported by the propositions.\n" + "\n".join(lines) +
+              '\n\nReturn ONLY JSON: {"title": "max 8 words", "summary": "3-5 sentences describing the narrative development and key transformations"}')
     return parse_json(llm._complete(prompt, 2000)) if llm.ok else None
 
 
@@ -491,6 +629,7 @@ def build_record(G: nx.DiGraph, path: list, llm: LLM, cfg: Config, extra: int) -
         "paragraphs": f"{n.par_first}" if n.par_first == n.par_last else f"{n.par_first}-{n.par_last}",
         "n_mentions": len(n.mentions), "actor": n.actor, "action": n.action, "object": n.object,
         "orientation": n.orientation, "emotion": n.emotion, "claim": n.claim, "evidence": n.evidence[:900],
+        "issue": n.issue, "stakes": n.stakes, "goal": n.goal, "causal": n.causal, "evaluation": n.evaluation,
         "mention_trajectory": [{"paragraph": m.par, "actor": m.actor, "action": m.action, "object": m.object,
                                 "orientation": m.orientation, "emotion": m.emotion} for m in n.mentions],
     } for n in nodes]
@@ -506,12 +645,21 @@ def build_record(G: nx.DiGraph, path: list, llm: LLM, cfg: Config, extra: int) -
     transitions = []
     for a, b, na, nb in zip(path[:-1], path[1:], nodes[:-1], nodes[1:]):
         e = G[a][b]
-        status, cos = {}, e["cos"]
+        # Edge-level "cos" stores narrative-frame candidate-retrieval diagnostics
+        # (claim/issue/stakes/goal/causal/evaluation/SVO/actor), not the SVO
+        # element dictionary expected by the legacy transformation report.
+        # Recompute actor/action/object cosine values from the proposition vectors.
+        _, cos = prop_sim(na.vec, nb.vec, cfg.weights)
+        status = {}
         for el in ELEMENTS:
             status[el] = ("na" if cos[el] is None else "same" if cos[el] >= cfg.same_thr
                           else "drift" if cos[el] >= cfg.drift_thr else "changed")
         status["orientation"] = orientation_status(na.orientation, nb.orientation)
         status["emotion"] = emotion_status(na.emotion, nb.emotion)
+        frame_cos = {f: cos_or_none(na.frame_vec.get(f), nb.frame_vec.get(f))
+                     for f in ("claim", "issue", "stakes", "goal", "causal", "evaluation")}
+        frame_status = {f: ("na" if v is None else "same" if v >= cfg.same_thr
+                            else "drift" if v >= cfg.drift_thr else "changed") for f, v in frame_cos.items()}
         changed = [k for k, v in status.items() if v not in ("same", "na")]
         if status["orientation"] == "flip":
             label = "orientation reversal" + (f" + {', '.join(c for c in changed if c != 'orientation')}"
@@ -520,10 +668,11 @@ def build_record(G: nx.DiGraph, path: list, llm: LLM, cfg: Config, extra: int) -
             label = "transformation: " + ", ".join(changed)
         else:
             label = "stable"
+        label = f"{e.get('relation', 'continuation')}: {label}"
         if e["gap"] > 1:
             label += f" (skips {e['gap'] - 1} document(s))"
-        transitions.append({"from": a, "to": b, "sim": float(e["sim"]), "cos": {k: (None if v is None else float(v)) for k, v in cos.items()},
-                            "status": status, "changed": changed, "days": e["days"], "gap": e["gap"], "label": label})
+        transitions.append({"from": a, "to": b, "relation": e.get("relation", "continuation"), "rationale": e.get("rationale", ""), "sim": float(e["sim"]), "cos": {k: (None if v is None else float(v)) for k, v in cos.items()},
+                            "status": status, "frame_cos": frame_cos, "frame_status": frame_status, "changed": changed, "days": e["days"], "gap": e["gap"], "label": label})
 
     T = max(len(transitions), 1)
     notes = []
@@ -537,6 +686,12 @@ def build_record(G: nx.DiGraph, path: list, llm: LLM, cfg: Config, extra: int) -
                   if c_end is not None and c_end < cfg.drift_thr and n_ch == 0 else "")
         notes.append(f"{el.capitalize()}: compared in {len(compared)} of {T} steps ({n_ch} changed, {n_dr} drifted); "
                      f"start vs end cos {c_txt} ('{steps[0][el]}' -> '{steps[-1][el]}').{hidden}")
+    for field_name in ("issue", "stakes", "goal", "causal", "evaluation"):
+        vals = [t["frame_status"][field_name] for t in transitions if t["frame_status"][field_name] != "na"]
+        start_end = cos_or_none(nodes[0].frame_vec.get(field_name), nodes[-1].frame_vec.get(field_name))
+        start_end_txt = "n/a" if start_end is None else f"{start_end:.2f}"
+        notes.append(f"Narrative {field_name}: {sum(v == 'changed' for v in vals)} changed and "
+                     f"{sum(v == 'drift' for v in vals)} drifted transition(s); start-to-end similarity {start_end_txt}.")
     for el, fn in (("orientation", orientation_status), ("emotion", emotion_status)):
         n_ch = sum(t["status"][el] != "same" for t in transitions)
         n_fl = sum(t["status"][el] == "flip" for t in transitions)
@@ -704,7 +859,7 @@ def process_dataset(path: Path, args, cfg: Config, nlp, llm: LLM, embedder, out_
         return
     attach_vectors(mentions, embedder)
     pd.DataFrame([{"doc": docs.doc_id[m.doc], "paragraph": m.par, "actor": m.actor, "action": m.action,
-                   "object": m.object, "orientation": m.orientation, "emotion": m.emotion, "claim": m.claim}
+                   "object": m.object, "orientation": m.orientation, "emotion": m.emotion, "claim": m.claim, "issue": m.issue, "stakes": m.stakes, "goal": m.goal, "causal": m.causal, "evaluation": m.evaluation}
                   for m in mentions]).to_csv(out / "mentions.csv", index=False)
 
     nodes, by_doc = [], {}
@@ -717,13 +872,35 @@ def process_dataset(path: Path, args, cfg: Config, nlp, llm: LLM, embedder, out_
     log.info("%d mentions merged into %d document-level propositions", len(mentions), len(nodes))
     pd.DataFrame([{"id": n.id, "doc_id": n.doc_id, "date": n.date.date(), "paragraphs": f"{n.par_first}-{n.par_last}",
                    "n_mentions": len(n.mentions), "actor": n.actor, "action": n.action, "object": n.object,
-                   "orientation": n.orientation, "emotion": n.emotion, "claim": n.claim}
+                   "orientation": n.orientation, "emotion": n.emotion, "claim": n.claim, "issue": n.issue, "stakes": n.stakes, "goal": n.goal, "causal": n.causal, "evaluation": n.evaluation}
                   for n in nodes]).to_csv(out / "propositions.csv", index=False)
 
-    G = build_graph(nodes, cfg)
+    G = build_graph(nodes, cfg, llm)
     pd.DataFrame([{"src": a, "dst": b, "sim": d["sim"], **{f"cos_{k}": v for k, v in d["cos"].items()},
                    "gap": d["gap"], "days": d["days"]} for a, b, d in G.edges(data=True)]).to_csv(
         out / "edges.csv", index=False)
+
+    # Full narrative graph is the primary result; rendered paths below are convenience views.
+    graph_nodes = []
+    for nid, data in G.nodes(data=True):
+        n = data["node"]
+        graph_nodes.append({"id": nid, "doc_id": n.doc_id, "date": n.date.date(), "claim": n.claim,
+                            "issue": n.issue, "stakes": n.stakes, "goal": n.goal, "causal": n.causal,
+                            "evaluation": n.evaluation, "actor": n.actor, "action": n.action, "object": n.object,
+                            "orientation": n.orientation, "emotion": n.emotion})
+    pd.DataFrame(graph_nodes).to_csv(out / "narrative_graph_nodes.csv", index=False)
+    graph_edges = [{"src": a, "dst": b, "similarity": d["sim"], "relation": d["relation"],
+                    "rationale": d["rationale"], "gap": d["gap"], "days": d["days"],
+                    **{f"sim_{k}": v for k, v in d["cos"].items()}} for a, b, d in G.edges(data=True)]
+    pd.DataFrame(graph_edges).to_csv(out / "narrative_graph_edges.csv", index=False)
+    thread_rows = []
+    for ti, comp in enumerate(sorted(nx.weakly_connected_components(G), key=lambda c: (-len(c), min(G.nodes[x]["node"].date for x in c))), 1):
+        ns = sorted((G.nodes[x]["node"] for x in comp), key=lambda n: (n.date, n.id))
+        thread_rows.append({"narrative_id": f"thread_{ti:04d}", "n_propositions": len(ns),
+                            "n_documents": len({n.doc_id for n in ns}), "start": ns[0].date.date(),
+                            "end": ns[-1].date.date(), "proposition_ids": " | ".join(n.id for n in ns),
+                            "claims": " || ".join(n.claim for n in ns)})
+    pd.DataFrame(thread_rows).to_csv(out / "narrative_threads.csv", index=False)
 
     ndocs = lambda c: len({G.nodes[i]["node"].doc for i in c})  # noqa: E731
     comps = sorted(nx.weakly_connected_components(G), key=lambda c: (-ndocs(c), -len(c)))
@@ -754,7 +931,9 @@ def process_dataset(path: Path, args, cfg: Config, nlp, llm: LLM, embedder, out_
         log.info("%d zero-change chains (verbatim repeats) were skipped; see identical_chains.csv", len(identical))
     (out / "config.json").write_text(json.dumps({"same_thr": cfg.same_thr, "drift_thr": cfg.drift_thr,
                                                  "merge_thr": cfg.merge_thr, "link_thr": cfg.link_thr,
-                                                 "link_min_element_cos": cfg.link_min_element_cos,
+                                                 "link_min_element_cos": cfg.link_min_element_cos, "candidate_top_k": cfg.candidate_top_k,
+                                                 "candidate_min_score": cfg.candidate_min_score, "narrative_link_thr": cfg.narrative_link_thr,
+                                                 "llm_link_classification": cfg.llm_link_classification,
                                                  "link_ignore_pronoun_actor": cfg.link_ignore_pronoun_actor,
                                                  "emotion_scheme": "Jasper (1998) Table I", "emotion_labels": EMOTIONS}, indent=2))
     build_viewer.build(out)  # viewer.html + narrative_trajectories.csv + narrative_summary.csv
@@ -798,10 +977,15 @@ def parse_args(argv=None):
     g.add_argument("--merge-require", default=d.merge_require, choices=["none", "orientation", "emotion", "both"],
                    help="also require equal orientation / emotion to merge")
     g.add_argument("--min-element-cos", type=float, default=d.min_element_cos)
-    g.add_argument("--link-thr", type=float, default=d.link_thr, help="link propositions across documents")
-    g.add_argument("--max-gap", type=int, default=d.max_gap, help="documents a narrative may skip")
+    g.add_argument("--link-thr", type=float, default=d.link_thr, help="legacy compatibility option; use --candidate-min-score and --narrative-link-thr")
+    g.add_argument("--max-gap", type=int, default=d.max_gap, help="legacy compatibility option; narrative retrieval can reconnect after long gaps")
     g.add_argument("--link-min-element-cos", type=float, default=d.link_min_element_cos,
-                   help="every comparable SVO element must reach this to link across documents (0 = old behaviour)")
+                   help="deprecated compatibility option; narrative-aware linking no longer applies a per-element SVO gate")
+    g.add_argument("--candidate-top-k", type=int, default=d.candidate_top_k, help="historical candidates classified per proposition")
+    g.add_argument("--candidate-min-score", type=float, default=d.candidate_min_score, help="minimum recall-oriented retrieval score")
+    g.add_argument("--narrative-link-thr", type=float, default=d.narrative_link_thr, help="fallback threshold when relationship LLM is unavailable")
+    g.add_argument("--no-link-classifier", action="store_true", help="use embedding-based fallback rather than LLM relationship classification")
+    g.add_argument("--max-link-calls", type=int, default=d.max_link_calls, help="cap relationship LLM calls; 0 = unlimited")
     g.add_argument("--keep-pronoun-actor", action="store_true",
                    help="let a matching first-person actor (we/I) count towards linking (old behaviour)")
     g.add_argument("--same-thr", type=float, default=d.same_thr, help="element cosine >= this = unchanged")
@@ -826,7 +1010,9 @@ def config_from_args(a) -> Config:
                  link_min_element_cos=a.link_min_element_cos, link_ignore_pronoun_actor=not a.keep_pronoun_actor,
                  drift_thr=a.drift_thr, weights=w, min_path_len=a.min_path_len, top_n=a.top_n, skip_identical=not a.keep_identical,
                  max_steps=a.max_steps, max_docs=a.max_docs, force_english=a.force_english, context=a.context,
-                 extractor="spacy" if a.no_llm else a.extractor)
+                 extractor="spacy" if a.no_llm else a.extractor, candidate_top_k=a.candidate_top_k,
+                 candidate_min_score=a.candidate_min_score, narrative_link_thr=a.narrative_link_thr,
+                 llm_link_classification=not a.no_link_classifier, max_link_calls=a.max_link_calls)
     if not cfg.drift_thr <= cfg.same_thr:
         raise SystemExit("--drift-thr must be <= --same-thr")
     return cfg
