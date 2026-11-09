@@ -6,9 +6,9 @@ Instead of clustering short texts, the unit of analysis is a *proposition*:
     actor + action + object  (+ orientation + emotion)
 
 An LLM extracts propositions paragraph by paragraph; propositions that keep recurring across documents are chained
-into **narratives**, and every step is compared with the previous one and with day 1: did the actor, the action or the
-object drift? Did the author's stance flip from supportive to critical? Did the emotion flip between *encouraging*
-and *dampening* protest? Emotions follow Jasper's (1998) typology of protest emotions.
+into **narratives**, and every step is compared with the previous one and with day 1. The following questions are supported:
+did the actor, the action or the object transform? Did the author's stance flip from supportive to critical? Did the emotion 
+flip between *encouraging* and *dampening* protest? Emotions follow Jasper's (1998) typology of protest emotions.
 
 ## Pipeline
 
@@ -52,8 +52,8 @@ A CSV (also `.json`, `.jsonl`, `.parquet`) with one row per document:
 
 ## Try it on the demo data
 
-`demo/` holds a small **synthetic** corpus (15 documents of a fictional "Riverside Climate Collective", English, German-style
-dates, newsletters with a repeated footer). It contains one planted storyline: the council plans a tram extension,
+`demo/` gives a small **synthetic** corpus (15 documents of a fictional "Riverside Climate Collective" in English with German-style
+dates and with a repeated footer to mimic newsletters). It contains one storyline: the council plans a tram extension,
 postpones, cuts and cancels it, then reinstates it under pressure, with a stance and emotion trajectory that should flip.
 
 ```bash
@@ -65,14 +65,14 @@ python clean_input.py --input demo/demo_corpus_raw.csv --output cleaned.csv --da
 python proposition_tracker.py --input demo/demo_corpus_clean.csv --lang en --out demo_out \
     --context "a small local climate association"
 
-# 3. analyse
+# 3. analyze
 python analyze_corpus.py --input-dir demo_out/demo_corpus_clean --out analysis_out \
     --meta demo/demo_corpus_clean.csv --config demo/analysis_config.json
 ```
 
-Open `demo_out/demo_corpus_clean/viewer.html` in a browser. To run without an LLM, add `--extractor spacy` to step 2. Whether the tram storyline comes out as one chain depends on
-how consistently your LLM words actor/action/object; with a 15-document corpus, expect to tune `--link-thr`.
-Without an LLM, `--no-llm` falls back to rule-based SVO only (orientation and emotion stay neutral).
+Once done, open `demo_out/demo_corpus_clean/viewer.html` in a browser. To run without an LLM, add `--extractor spacy` to step 2. Whether the 
+tram storyline comes out as one chain depends on how consistently your LLM words actor/action/object; with a 15-document corpus, expect to 
+tune `--link-thr`. Without an LLM, `--no-llm` falls back to rule-based SVO only (orientation and emotion stay neutral).
 
 ## Choosing an extractor
 
@@ -84,12 +84,12 @@ Without an LLM, `--no-llm` falls back to rule-based SVO only (orientation and em
 | narrative titles / summaries | LLM | generic ("actor: action object") |
 | speed, cost | slow, needs Ollama | fast, no network |
 
-The spaCy extractor emits one proposition per verb with a subject or object, keeps the `--max-props` best (both subject and
+The spaCy extractor produces one proposition per verb with a subject or object, keeps the `--max-props` best (both subject and
 object found), and handles conjoined verbs, "wants to X", `it/they` resolved to the main-clause subject, negation
 (`not extend`) and English passives (`cancelled by the council` → actor = council). It is also the fallback when
 `--no-llm` is set or a single LLM call fails.
 
-Limits: no coreference beyond the pronoun rule, no stance or emotion, and wording is not normalised across synonyms
+Limits: no co-reference beyond the pronoun rule, no stance or emotion, and wording is not normalized across synonyms
 ("scrap" and "cancel" stay different verbs; the embeddings still treat them as close). With `--lang de` the claim and
 elements stay German, and the small model (`de_core_news_sm`) mis-tags some verbs; use `_md`, `_lg` or `_trf` for better results.
 The `orientation`/`emotion` figures in `analyze_corpus.py` are meaningless for a spaCy-only run.
@@ -101,7 +101,7 @@ The `orientation`/`emotion` figures in `analyze_corpus.py` are meaningless for a
 `narrative_trajectories.csv` (every step measured against day 1), `narrative_summary.csv`. LLM answers are cached in
 `<out>/llm_cache.json` (keyed by model + prompt, so changing `--context`, `--max-props` etc. re-queries the model).
 
-## Settings that matter
+## Settings 
 
 | Option | Default | Effect |
 |---|---|---|
@@ -123,19 +123,21 @@ with `--config your.json` (see `demo/analysis_config.json`), and choose periods 
 pip install -r requirements-dev.txt && pytest
 ```
 
-Unit tests plus an end-to-end smoke test with a stub LLM and embedder (no models needed). They check the plumbing,
+Unit tests plus an end-to-end test with a stub LLM and embedder (no models needed). They check the plumbing,
 not the quality of real LLM output.
 
-## Caveats
+## Keep in mind
 
 - With the LLM extractor, orientation and emotion are **one LLM label per paragraph**; validate on a hand-coded sample before drawing conclusions.
 - The mapping of emotions to *encouraging / dampening / mixed* (`EMOTION_DIRECTION` in `emotions.py`) is the author's reading
   of Jasper's table, not part of it. It only decides what counts as an emotion "flip".
 - Themes and actor classes in `analyze_corpus.py` are keyword rules and cover only part of the propositions.
-- Bootstrap intervals are 95 % percentile intervals over documents, not corrected for multiple comparisons.
+- Bootstrap intervals are 95% percentile intervals over documents, not corrected for multiple comparisons.
 - Element vectors are English: the LLM is asked to answer in English even for German sources.
 
 ## Reference
 
 Jasper, J. M. (1998). The emotions of protest: Affective and reactive emotions in and around social movements.
 *Sociological Forum, 13*(3), 397-424.
+Grobelscheg, L., Kahr, E. and Strembeck, M. (2026). Exploring Narrative Continuity, Narrative Drift, and Narrative Gaps in Social Media. 
+*The 13th International Conference on Social Networks Analysis, Management and Security (SNAMS 2026)*, Barcelona, Spain, 17.11.-20.11.2026. 
