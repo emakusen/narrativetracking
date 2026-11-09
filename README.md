@@ -1,148 +1,423 @@
-# Proposition tracker
+# Proposition Tracker: Tracing Narrative Transformation Over Time
 
-Traces how **narratives change over time** in long documents (blog posts, newsletters, speeches, transcripts).
-Instead of clustering short texts, the unit of analysis is a *proposition*:
+The **Proposition Tracker** is a computational framework for tracing how narratives evolve and transform over time in long-form textual corpora, including blog posts, newsletters, press releases, and speech transcripts.
 
-    actor + action + object  (+ orientation + emotion)
+The tracker extracts and follows *propositions* across documents as a basic building block of a narrative. A proposition is represented through:
 
-A narrative is not a sequence of propositions with similar wording. It is an evolving story of an issue: 
+- **Actor:** who is involved?
+- **Action:** what happens or is claimed?
+- **Object:** what is the action directed towards?
+- **Orientation:** how is the proposition evaluated?
+- **Emotion:** what emotion is expressed?
+
+The central premise is that **a narrative is not simply a sequence of propositions with similar wording**. It is an evolving storyline related to an issue. We trace
 - who is involved,
 - what is happening,
-- why it matters,
-- what should happen next, and
+- why it matters, and
 - how the situation is interpreted.
 
-The propositions are the observable building blocks. The narrative is a thread that connects the propositions over time.
+The relationships between propositions over time form narrative threads. The tracker combines proposition extraction, semantic similarity, narrative-frame representations and relationship classification to identify narrative continuity and transformation.
+
+## Conceptual approach
+
+The framework establishes two interconnected layers of analysis.
+
+### 1. Proposition layer
+
+Individual claims are extracted from documents and represented as structured propositions. Each proposition keeps its original text, document and paragraph references, timestamp, actor, action, object, orientation, and emotion.
+
+### 2. Narrative layer
+
+Propositions are then connected through typed relationships that describe how one claim relates to another claim. The relationship categories include:
+
+- **Continuation:** the same storyline develops further.
+- **Elaboration:** additional information or detail is introduced.
+- **Reaction:** an actor responds to an earlier event or claim.
+- **Consequence:** a development follows from an earlier event or situation.
+- **Reframing:** an issue is interpreted differently.
+- **Contradiction:** a later proposition challenges an earlier one.
+- **Topic-related:** propositions concern a related subject but do not necessarily develop the same storyline.
+- **Unrelated:** no meaningful narrative relationship is identified.
+
+This distinction is important: topic similarity alone does not establish narrative continuity (see also Grobelscheg, Kahr & Strembeck (2026) below).
+
+The resulting representation is a directed, temporal graph. Unlike a simple linear chain, the graph allows multiple incoming and outgoing relationships, branching developments, and the reappearance of previously discussed issues.
 
 ## Pipeline
 
-    raw.csv ──clean_input.py──▶ cleaned.csv ──proposition_tracker.py──▶ proposition_out/<name>/ ──analyze_corpus.py──▶ analysis_out/
-             ISO dates, ids,                  propositions, narratives,                              period shares, themes,
-             footers removed                  figures, viewer.html                                   bootstrap comparison
+```text
+raw.csv
+   |
+   v
+clean_input.py
+   |
+   v
+cleaned.csv
+   |
+   v
+proposition_tracker.py
+   |
+   +--> Proposition extraction
+   |
+   +--> Narrative-frame enrichment
+   |
+   +--> Candidate retrieval
+   |
+   +--> Narrative relationship classification
+   |
+   +--> Temporal narrative graph
+   |
+   +--> Transformation analysis
+   |
+   v
+proposition_out/<dataset>/
+   |
+   +--> Proposition and narrative graph data
+   +--> Narrative threads and summaries
+   +--> Figures and interactive viewer
+   |
+   v
+analyze_corpus.py
+   |
+   v
+analysis_out/
+   +--> Period-based distributions
+   +--> Emotion and orientation analysis
+   +--> Actor and theme analysis
+   +--> Bootstrap comparisons
+```
+
+## Components
 
 | Script | Purpose |
 |---|---|
-| `clean_input.py` | Parse dates with an explicit format (writes ISO), strip newsletter footers / repeated paragraphs, write `id` |
-| `proposition_tracker.py` | Paragraphs → propositions (LLM, or spaCy alone with `--extractor spacy`) → merge within document → link across documents → narrative figures |
-| `build_viewer.py` | Called by the tracker; builds `viewer.html` (self-contained), `narrative_trajectories.csv`, `narrative_summary.csv`. Flags unchanged chains as likely boilerplate |
-| `analyze_corpus.py` | Corpus-level figures and tables per period (emotion, orientation, actors, keyword themes, bootstrap comparison) |
-| `spacy_props.py` | Rule-based proposition extraction from the dependency parse (no LLM) |
-| `emotions.py`, `llm_utils.py` | Shared emotion scheme; Ollama client and spaCy SVO helper |
+| `clean_input.py` | Parses dates, assigns document IDs, removes newsletter footers and optionally identifies repeated paragraphs. |
+| `proposition_tracker.py` | Main tracking pipeline: extracts propositions, enriches them with narrative frames, retrieves candidates, classifies relationships and constructs a temporal narrative graph. |
+| `build_viewer.py` | Generates the interactive narrative viewer and trajectory-related outputs. |
+| `analyze_corpus.py` | Produces corpus-level figures and tables, including period comparisons, emotion, orientation, actors and keyword-based themes. |
+| `spacy_props.py` | Rule-based proposition extraction using dependency parsing. |
+| `emotions.py` | Shared emotion scheme and emotion-related utilities. |
+| `llm_utils.py` | Ollama client and shared NLP helpers. |
 
 ## Install
 
 ```bash
-python -m venv .venv && source .venv/bin/activate        # Python 3.9+
+python -m venv .venv
+source .venv/bin/activate
+
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm                  # de_core_news_sm for --lang de
-ollama pull gpt-oss:20b && ollama serve                  # local LLM; any Ollama model works via --llm-model
+
+python -m spacy download en_core_web_sm
+# For German:
+python -m spacy download de_core_news_sm
 ```
 
-The LLM is optional: with `--extractor spacy` only spaCy is needed.
+The LLM-based pipeline uses Ollama:
+
+```bash
+ollama pull gpt-oss:20b
+ollama serve
+```
+
+Other Ollama models can be selected through `--llm-model`.
+
+The spaCy-based proposition extractor can also be used without an LLM.
 
 ## Input format
 
-A CSV (also `.json`, `.jsonl`, `.parquet`) with one row per document:
+The tracker accepts CSV, JSON, JSONL, and Parquet files, with one row per document.
 
-| column | required | |
+| Column | Required | Description |
 |---|---|---|
-| `full_text` | yes | paragraphs separated by blank lines |
-| `date` | yes | **ISO (`2026-04-11`)**; run `clean_input.py` if yours look like `11.04.2026` |
-| `title`, `id`, `source` | no | `id` is written by `clean_input.py`; `source` (blog / newsletter / ...) is used by `analyze_corpus.py --meta` |
+| `full_text` | Yes | Document text. Paragraphs should be separated by blank lines. |
+| `date` | Yes | Document date, preferably ISO format (`2026-04-11`). |
+| `id` | No | Unique document identifier. Generated by `clean_input.py` if absent. |
+| `title` | No | Document title. |
+| `source` | No | Source type (e.g. blog, newsletter, speech). Useful for corpus-level analysis. |
 
-> **Why `clean_input.py` matters.** Dates like `11.04.2026` are read month-first by pandas when the day is ≤ 12
-> (→ 4 November). Newsletter footers turn into "propositions" that chain into perfect, meaningless narratives.
-> Use `--report-repeats repeats.csv` first, look at what would be removed, then add `--drop-repeats`.
+### Why preprocessing matters
+
+Date parsing and repeated text can substantially affect narrative tracking.
+
+Newsletter footers, boilerplate texts, and recurring announcements may generate propositions that appear repeatedly and create artificial narrative continuity.
+
+Use `clean_input.py` to standardize dates, inspect repeated paragraphs, and (optionally) remove them.
+
+For example:
+
+```bash
+python clean_input.py \
+    --input raw.csv \
+    --output cleaned.csv \
+    --date-format "%d.%m.%Y" \
+    --report-repeats repeats.csv \
+    --drop-repeats \
+    --repeat-min-docs 4
+```
+
+Always inspect `repeats.csv` before removing repeated material!
+
+Dates should be converted to ISO format during preprocessing.
 
 ## Try it on the demo data
 
-`demo/` gives a small **synthetic** corpus (15 documents of a fictional "Riverside Climate Collective" in English with German-style
-dates and with a repeated footer to mimic newsletters). It contains one storyline: the council plans a tram extension,
-postpones, cuts and cancels it, then reinstates it under pressure, with a stance and emotion trajectory that should flip.
+The `demo/` directory contains a small synthetic corpus of 15 documents from a fictional local climate association, the "Riverside Climate Collective".
+
+The corpus includes several related storylines:
+
+- The proposed tram extension and its political trajectory.
+- Campaigning for fewer cars and changes in urban mobility.
+- Citizen energy and community initiatives.
+- Repair and sharing activities.
+
+The tram storyline is designed to illustrate narrative transformation: initial support, consultation, delays, cancellation, collective mobilization, and eventual reinstatement.
+
+### 1. Clean the corpus
 
 ```bash
-# 1. clean (demo/demo_corpus_clean.csv is already the result)
-python clean_input.py --input demo/demo_corpus_raw.csv --output cleaned.csv --date-format "%d.%m.%Y" \
-    --report-repeats repeats.csv --drop-repeats --repeat-min-docs 4
-
-# 2. track (needs Ollama running)
-python proposition_tracker.py --input demo/demo_corpus_clean.csv --lang en --out demo_out \
-    --context "a small local climate association"
-
-# 3. analyze
-python analyze_corpus.py --input-dir demo_out/demo_corpus_clean --out analysis_out \
-    --meta demo/demo_corpus_clean.csv --config demo/analysis_config.json
+python clean_input.py \
+    --input demo/demo_corpus_raw.csv \
+    --output demo_cleaned.csv \
+    --date-format "%d.%m.%Y" \
+    --report-repeats repeats.csv \
+    --drop-repeats \
+    --repeat-min-docs 4
 ```
 
-Once done, open `demo_out/demo_corpus_clean/viewer.html` in a browser. To run without an LLM, add `--extractor spacy` to step 2. Whether the 
-tram storyline comes out as one chain depends on how consistently your LLM words actor/action/object; with a 15-document corpus, expect to 
-tune `--link-thr`. Without an LLM, `--no-llm` falls back to rule-based SVO only (orientation and emotion stay neutral).
+### 2. Track propositions and narratives
+
+```bash
+python proposition_tracker.py \
+    --input demo_cleaned.csv \
+    --lang en \
+    --out demo_out \
+    --context "a small local climate association" \
+    --max-props 6 \
+    --candidate-top-k 5 \
+    --candidate-min-score 0.42 \
+    --narrative-link-thr 0.58
+```
+
+The LLM-based extraction and relationship classification require Ollama to be running.
+
+### 3. Analyse the corpus
+
+```bash
+python analyze_corpus.py \
+    --input-dir demo_out/demo_cleaned \
+    --out analysis_out \
+    --meta demo_cleaned.csv \
+    --config demo/analysis_config.json
+```
+
+### 4. Explore the results
+
+Open the generated `viewer.html` in a browser. The interactive viewer provides an overview of the extracted narrative trajectories and their development over time.
+
+The numerical thresholds above are starting values for the synthetic demo corpus, not universal defaults for other datasets.
+
+## Narrative-frame representation
+
+In addition to the SVO representation, each proposition is enriched with a narrative frame.
+
+| Dimension | Description |
+|---|---|
+| Issue | The underlying subject or problem. |
+| Stakes | Why the issue matters and what is at risk. |
+| Goal | The desired outcome or proposed solution. |
+| Causal interpretation | Who or what is presented as causing the situation. |
+| Evaluation | How the situation, actors or developments are judged. |
+
+These dimensions help identify narrative continuity when the wording, actors, or actions change.
+
+For example, the following propositions have different SVO structures:
+
+1. The council reduces the tram budget.
+2. Residents organize a petition to defend the extension.
+3. Volunteers announce demonstrations.
+4. The council is accused of ignoring public demands.
+
+Nevertheless, they may belong to the same evolving storyline because they concern the same issue, stakes, and desired outcome.
+
+Also, the narrative frame is not assumed to remain stable. Changes in its dimensions are themselves part of the transformation being traced.
+
+## Narrative transformation
+
+The tracker distinguishes between proposition-layer and narrative-layer transformation.
+
+### Proposition-layer transformation
+
+Tracks changes in:
+
+- Actor
+- Action
+- Object
+- Orientation
+- Emotion
+
+### Narrative-layer transformation
+
+Tracks changes in:
+
+- Issue definition
+- Stakes
+- Goals
+- Causal interpretation
+- Evaluation
+
+Two temporal comparisons are relevant to distinguish short-term changes from longer-term narrative transformation:
+
+- **Local transformation:** compares a proposition with the preceding occurrence in its narrative trajectory.
+- **Cumulative transformation:** compares a proposition with the initial occurrence of the narrative.
+
+Orientation and emotion are treated as separate dimensions. For example, a proposition can remain critical towards an institution while expressing different emotions over time, such as anger, resignation, or defiance.
+
+## Output
+
+The tracker generates several files for each processed dataset.
+
+| Output | Description |
+|---|---|
+| `paragraphs.csv` | Processed paragraphs and associated metadata. |
+| `mentions.csv` | Proposition mentions and their document references. |
+| `propositions.csv` | Extracted and merged propositions. |
+| `edges.csv` | Proposition relationships in the legacy output format, where applicable. |
+| `narrative_graph_nodes.csv` | Proposition nodes and their narrative-frame information. |
+| `narrative_graph_edges.csv` | Directed, typed relationships, similarity scores, and classification information. |
+| `narrative_threads.csv` | Narrative-thread assignments and associated propositions. |
+| `narratives.csv` | Narrative descriptions and summaries. |
+| `narrative_XX.png` / `.json` | Narrative visualizations and structured records. |
+| `isolated_propositions.csv` | Propositions without accepted narrative connections. |
+| `identical_chains.csv` | Detected repeated or identical chains. |
+| `config.json` | Configuration used for the run. |
+| `viewer.html` | Interactive narrative viewer. |
+| `narrative_trajectories.csv` | Temporal transformation measurements. |
+| `narrative_summary.csv` | Narrative-level summary statistics. |
+
+LLM responses are cached in `llm_cache.json` where supported. The cache is intended to avoid repeated model calls for identical model-and-prompt combinations.
+
+**Important:** The full graph should be treated as the primary analytical representation. A displayed main path is a simplified view and does not necessarily capture all branches or relationships in a narrative.
+
+## Configuration and parameters
+
+The main tracking parameters control extraction, candidate retrieval, relationship classification, and transformation measurement.
+
+| Parameter | Description |
+|---|---|
+| `--context` | Describes the organization or context producing the texts; included in LLM prompts. |
+| `--max-props` | Maximum number of propositions extracted per paragraph. |
+| `--candidate-top-k` | Number of candidate propositions retrieved for relationship assessment. |
+| `--candidate-min-score` | Minimum candidate retrieval score. |
+| `--narrative-link-thr` | Threshold used in narrative relationship linking. |
+| `--same-thr` | Similarity threshold for classifying an element as unchanged. |
+| `--drift-thr` | Similarity threshold for classifying an element as drifted. |
+| `--merge-thr` | Threshold for merging repeated propositions within a document. |
+
+The candidate retrieval and narrative-linking parameters should be calibrated on a manually inspected sample of each corpus.
+
+A high candidate retrieval score is not itself evidence that two propositions belong to the same narrative. Relationship classification and narrative coherence must also be considered.
+
+### Corpus-level analysis
+
+`analyze_corpus.py` supports configurable keyword-based themes and actor classes.
+
+Example: `demo/analysis_config.json`
+
+```json
+{
+  "themes": {
+    "public transport": "tram|transport|\\bbus\\b|commut|\\bcars?\\b|motorway",
+    "citizen energy": "solar|energy|electricity|cooperative",
+    "repair / sharing": "repair|tool library|sharing|waste",
+    "council / politics": "council|budget|consultation|petition"
+  },
+  "actor_classes": {
+    "collective (we / volunteers)": [
+      "we",
+      "us",
+      "our",
+      "volunteers",
+      "residents",
+      "neighbours",
+      "the collective"
+    ],
+    "institutions / politics": [
+      "city council",
+      "council",
+      "government",
+      "politicians"
+    ]
+  }
+}
+```
+
+These are keyword-based classifications and should be adapted to the corpus under investigation.
 
 ## Choosing an extractor
 
-| | `--extractor llm` (default) | `--extractor spacy` |
+The framework supports LLM-based and spaCy-based proposition extraction.
+
+| | LLM extractor | spaCy extractor |
 |---|---|---|
-| actor / action / object | LLM, canonical English wording | dependency parse: subject, verb lemma, object, in the document's language |
-| orientation, emotion | LLM label per paragraph | always `neutral` (cannot be read off the syntax) |
-| claim | LLM one-sentence English paraphrase | the source sentence |
-| narrative titles / summaries | LLM | generic ("actor: action object") |
-| speed, cost | slow, needs Ollama | fast, no network |
+| Actor / action / object | LLM-generated canonical representation | Dependency parsing |
+| Orientation | LLM classification | Neutral |
+| Emotion | LLM classification | Neutral |
+| Claim | Paraphrased proposition | Source sentence |
+| Narrative frame | LLM-generated | Limited or unavailable |
+| Speed | Slower | Faster |
+| External model | Requires Ollama | No LLM required |
 
-The spaCy extractor produces one proposition per verb with a subject or object, keeps the `--max-props` best (both subject and
-object found), and handles conjoined verbs, "wants to X", `it/they` resolved to the main-clause subject, negation
-(`not extend`) and English passives (`cancelled by the council` → actor = council). It is also the fallback when
-`--no-llm` is set or a single LLM call fails.
+The spaCy extractor identifies propositions through dependency parsing. Its performance depends on the language model and grammatical structure of the source text.
 
-Limits: no co-reference beyond the pronoun rule, no stance or emotion, and wording is not normalized across synonyms
-("scrap" and "cancel" stay different verbs; the embeddings still treat them as close). With `--lang de` the claim and
-elements stay German, and the small model (`de_core_news_sm`) mis-tags some verbs; use `_md`, `_lg` or `_trf` for better results.
-The `orientation`/`emotion` figures in `analyze_corpus.py` are meaningless for a spaCy-only run.
+Limitations include limited co-reference resolution, difficulty with implicit actors and objects, and inconsistent normalization of synonyms.
 
-## Output of `proposition_tracker.py` (per dataset)
+For German, larger spaCy models (`_md`, `_lg` or `_trf`) may provide better results than the small model.
 
-`paragraphs.csv`, `mentions.csv`, `propositions.csv`, `edges.csv`, `narratives.csv`, `narrative_XX.png` / `.json`,
-`identical_chains.csv` (verbatim repeats that were skipped), `isolated_propositions.csv`, `config.json`, `viewer.html`,
-`narrative_trajectories.csv` (every step measured against day 1), `narrative_summary.csv`. LLM answers are cached in
-`<out>/llm_cache.json` (keyed by model + prompt, so changing `--context`, `--max-props` etc. re-queries the model).
+The spaCy-only pipeline should not be used to draw conclusions about emotion or orientation, since these are not inferred from dependency syntax.
 
-## Settings 
+## Methodological considerations and limitations
 
-| Option | Default | Effect |
-|---|---|---|
-| `--context` | "a social movement or advocacy organisation" | Who wrote the texts; inserted into the LLM prompts |
-| `--merge-thr` | 0.80 | Same proposition in consecutive paragraphs of one document |
-| `--link-thr` | 0.60 | Link propositions across documents (looser on purpose: transformation is allowed) |
-| `--link-min-element-cos` | 0.50 | Every comparable element must reach this, so one matching element can't carry a link |
-| `--max-gap` | 3 | Documents a narrative may skip |
-| `--same-thr` / `--drift-thr` | 0.85 / 0.60 | Element cosine ≥ same = unchanged, ≥ drift = drifted, else changed |
-| `--weights` | 0.25,0.25,0.5 | actor, action, object |
+The framework is designed to support the empirical investigation of narrative continuity and transformation. Its outputs should not be treated as ground truth.
 
-`analyze_corpus.py` has keyword rules for themes and actor classes built in (climate-movement vocabulary). Replace them
-with `--config your.json` (see `demo/analysis_config.json`), and choose periods with `--periods year` (default) or
-`--periods "2020,2021,2022-2023"`.
+Important considerations include:
+
+- **Extraction quality:** LLMs may omit claims, merge distinct propositions or generate inconsistent canonical representations.
+- **Relationship classification:** An LLM may identify a plausible relationship between propositions that are only broadly topic-related.
+- **Narrative grouping:** Connected graph components can become very large through transitive relationships. A shared component does not necessarily represent one coherent narrative.
+- **Narrative branching:** A main path is a simplified representation of a potentially much more complex graph.
+- **Emotion and orientation:** These classifications require validation against manually coded examples.
+- **Semantic similarity:** Embedding similarity captures semantic proximity, not necessarily narrative continuity.
+- **Corpus composition:** Repeated announcements, changes in source type and uneven document frequency can affect observed trajectories.
+
+For these reasons, narrative links and thread assignments should be inspected and validated before drawing substantive conclusions.
+
+## Future development
+
+The current implementation provides proposition-level extraction, narrative-frame enrichment, typed relationship classification, and graph-based narrative tracking.
+
+Several extensions are planned:
+
+1. **Narrative families and threads:** distinguish broad thematic narrative families from specific evolving storylines.
+2. **Narrative coherence:** prevent weak transitive connections from merging unrelated propositions into oversized narrative components.
+3. **Membership confidence:** assess the evidence supporting the assignment of each proposition to a narrative thread.
+4. **Subthread detection:** identify branching, splitting, and converging narrative developments.
+5. **Cross-narrative interaction:** capture relationships between distinct narratives without automatically merging them.
+6. **Improved transformation metrics:** distinguish changes in the main trajectory from changes across the complete narrative graph.
+7. **Validation framework:** evaluate proposition extraction, relationship classification, and narrative membership against manually annotated data.
+
+
 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest
+pip install -r requirements-dev.txt
+pytest
 ```
 
-Unit tests plus an end-to-end test with a stub LLM and embedder (no models needed). They check the plumbing,
-not the quality of real LLM output.
+Unit tests and end-to-end tests with stub LLM and embedding components check the technical pipeline. They do not establish the empirical validity of narrative extraction or classification.
 
-## Keep in mind
+## References
 
-- With the LLM extractor, orientation and emotion are **one LLM label per paragraph**; validate on a hand-coded sample before drawing conclusions.
-- The mapping of emotions to *encouraging / dampening / mixed* (`EMOTION_DIRECTION` in `emotions.py`) is the author's reading
-  of Jasper's table, not part of it. It only decides what counts as an emotion "flip".
-- Themes and actor classes in `analyze_corpus.py` are keyword rules and cover only part of the propositions.
-- Bootstrap intervals are 95% percentile intervals over documents, not corrected for multiple comparisons.
-- Element vectors are English: the LLM is asked to answer in English even for German sources.
+Jasper, J. M. (1998). The emotions of protest: Affective and reactive emotions in and around social movements. *Sociological Forum, 13*(3), 397–424.
 
-## Reference
-
-Jasper, J. M. (1998). The emotions of protest: Affective and reactive emotions in and around social movements.
-*Sociological Forum, 13*(3), 397-424.
-
-Grobelscheg, L., Kahr, E. and Strembeck, M. (2026). Exploring Narrative Continuity, Narrative Drift, and Narrative Gaps in Social Media. 
-*The 13th International Conference on Social Networks Analysis, Management and Security (SNAMS 2026)*, Barcelona, Spain, 17.11.-20.11.2026. 
+Grobelscheg, L., Kahr, E. and Strembeck, M. (2026). Exploring Narrative Continuity, Narrative Drift, and Narrative Gaps in Social Media. *The 13th International Conference on Social Networks Analysis, Management and Security (SNAMS 2026)*, Barcelona, Spain, 17–20 November 2026.
