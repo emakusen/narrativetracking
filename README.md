@@ -19,9 +19,10 @@ and *dampening* protest? Emotions follow Jasper's (1998) typology of protest emo
 | Script | Purpose |
 |---|---|
 | `clean_input.py` | Parse dates with an explicit format (writes ISO), strip newsletter footers / repeated paragraphs, write `id` |
-| `proposition_tracker.py` | Paragraphs → propositions (spaCy hints + LLM) → merge within document → link across documents → narrative figures |
+| `proposition_tracker.py` | Paragraphs → propositions (LLM, or spaCy alone with `--extractor spacy`) → merge within document → link across documents → narrative figures |
 | `build_viewer.py` | Called by the tracker; builds `viewer.html` (self-contained), `narrative_trajectories.csv`, `narrative_summary.csv`. Flags unchanged chains as likely boilerplate |
 | `analyze_corpus.py` | Corpus-level figures and tables per period (emotion, orientation, actors, keyword themes, bootstrap comparison) |
+| `spacy_props.py` | Rule-based proposition extraction from the dependency parse (no LLM) |
 | `emotions.py`, `llm_utils.py` | Shared emotion scheme; Ollama client and spaCy SVO helper |
 
 ## Install
@@ -32,6 +33,8 @@ pip install -r requirements.txt
 python -m spacy download en_core_web_sm                  # de_core_news_sm for --lang de
 ollama pull gpt-oss:20b && ollama serve                  # local LLM; any Ollama model works via --llm-model
 ```
+
+The LLM is optional: with `--extractor spacy` only spaCy is needed.
 
 ## Input format
 
@@ -67,9 +70,29 @@ python analyze_corpus.py --input-dir demo_out/demo_corpus_clean --out analysis_o
     --meta demo/demo_corpus_clean.csv --config demo/analysis_config.json
 ```
 
-Open `demo_out/demo_corpus_clean/viewer.html` in a browser. Whether the tram storyline comes out as one chain depends on
+Open `demo_out/demo_corpus_clean/viewer.html` in a browser. To run without an LLM, add `--extractor spacy` to step 2. Whether the tram storyline comes out as one chain depends on
 how consistently your LLM words actor/action/object; with a 15-document corpus, expect to tune `--link-thr`.
 Without an LLM, `--no-llm` falls back to rule-based SVO only (orientation and emotion stay neutral).
+
+## Choosing an extractor
+
+| | `--extractor llm` (default) | `--extractor spacy` |
+|---|---|---|
+| actor / action / object | LLM, canonical English wording | dependency parse: subject, verb lemma, object, in the document's language |
+| orientation, emotion | LLM label per paragraph | always `neutral` (cannot be read off the syntax) |
+| claim | LLM one-sentence English paraphrase | the source sentence |
+| narrative titles / summaries | LLM | generic ("actor: action object") |
+| speed, cost | slow, needs Ollama | fast, no network |
+
+The spaCy extractor emits one proposition per verb with a subject or object, keeps the `--max-props` best (both subject and
+object found), and handles conjoined verbs, "wants to X", `it/they` resolved to the main-clause subject, negation
+(`not extend`) and English passives (`cancelled by the council` → actor = council). It is also the fallback when
+`--no-llm` is set or a single LLM call fails.
+
+Limits: no coreference beyond the pronoun rule, no stance or emotion, and wording is not normalised across synonyms
+("scrap" and "cancel" stay different verbs; the embeddings still treat them as close). With `--lang de` the claim and
+elements stay German, and the small model (`de_core_news_sm`) mis-tags some verbs; use `_md`, `_lg` or `_trf` for better results.
+The `orientation`/`emotion` figures in `analyze_corpus.py` are meaningless for a spaCy-only run.
 
 ## Output of `proposition_tracker.py` (per dataset)
 
@@ -105,7 +128,7 @@ not the quality of real LLM output.
 
 ## Caveats
 
-- Orientation and emotion are **one LLM label per paragraph**; validate on a hand-coded sample before drawing conclusions.
+- With the LLM extractor, orientation and emotion are **one LLM label per paragraph**; validate on a hand-coded sample before drawing conclusions.
 - The mapping of emotions to *encouraging / dampening / mixed* (`EMOTION_DIRECTION` in `emotions.py`) is the author's reading
   of Jasper's table, not part of it. It only decides what counts as an emotion "flip".
 - Themes and actor classes in `analyze_corpus.py` are keyword rules and cover only part of the propositions.
