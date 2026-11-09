@@ -143,5 +143,6 @@ not the quality of real LLM output.
 
 Jasper, J. M. (1998). The emotions of protest: Affective and reactive emotions in and around social movements.
 *Sociological Forum, 13*(3), 397-424.
+
 Grobelscheg, L., Kahr, E. and Strembeck, M. (2026). Exploring Narrative Continuity, Narrative Drift, and Narrative Gaps in Social Media. 
 *The 13th International Conference on Social Networks Analysis, Management and Security (SNAMS 2026)*, Barcelona, Spain, 17.11.-20.11.2026. 
